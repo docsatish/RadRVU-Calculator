@@ -3,7 +3,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { StudyDefinition } from "../types";
 
 export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDefinition[]) => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
   
   // Provide a concise representation of the current dynamic DB to the model
   const studyListForContext = currentDb.map(s => `${s.cpt}: ${s.name} (${s.rvu} RVU)`).join('\n');
