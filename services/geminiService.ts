@@ -1,23 +1,23 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
-import { RADIOLOGY_STUDY_DB } from "../constants";
+import { StudyDefinition } from "../types";
 
-export const performOCRAndMatch = async (base64Image: string) => {
+export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDefinition[]) => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   
-  // Provide a concise representation of our DB to the model for matching
-  const studyListForContext = RADIOLOGY_STUDY_DB.map(s => `${s.cpt}: ${s.name} (${s.rvu} RVU)`).join('\n');
+  // Provide a concise representation of the current dynamic DB to the model
+  const studyListForContext = currentDb.map(s => `${s.cpt}: ${s.name} (${s.rvu} RVU)`).join('\n');
 
   const systemInstruction = `
     You are a professional Radiology Medical Coder.
-    Analyze the provided image (which is a screenshot of a radiology worklist, PACS, or report list).
+    Analyze the provided image (worklist screenshot).
     1. Extract all radiology studies performed.
-    2. Match each extracted study to the most likely CPT code from the provided reference list.
-    3. If a study is found that is NOT in the reference list, use a generic CPT or find the closest match.
+    2. Match each extracted study to the most likely CPT code from the PROVIDED REFERENCE LIST below.
+    3. The PROVIDED REFERENCE LIST is the definitive source for CPT codes and names.
     4. Provide the quantity (usually 1 per row unless specified).
     5. Output JSON only.
     
-    Reference List:
+    REFERENCE LIST:
     ${studyListForContext}
   `;
 
@@ -27,7 +27,7 @@ export const performOCRAndMatch = async (base64Image: string) => {
       {
         parts: [
           { inlineData: { mimeType: 'image/jpeg', data: base64Image.split(',')[1] } },
-          { text: "Extract all radiology procedures from this list and return as JSON. Match them to the provided CPT codes where possible." }
+          { text: "Extract all radiology procedures from this list and return as JSON. Match them to the provided REFERENCE LIST." }
         ]
       }
     ],
@@ -42,13 +42,13 @@ export const performOCRAndMatch = async (base64Image: string) => {
             items: {
               type: Type.OBJECT,
               properties: {
-                cpt: { type: Type.STRING, description: "CPT code if matched, otherwise leave blank or 'UNK'" },
-                name: { type: Type.STRING, description: "Descriptive name of the study" },
+                cpt: { type: Type.STRING, description: "CPT code from the reference list" },
+                name: { type: Type.STRING, description: "Name as it appears in the reference list" },
                 quantity: { type: Type.NUMBER, description: "Number of times this study appears" },
                 originalText: { type: Type.STRING, description: "Raw text found in image" },
                 confidence: { type: Type.NUMBER, description: "Matching confidence 0-1" }
               },
-              required: ["name", "quantity"]
+              required: ["cpt", "name", "quantity"]
             }
           }
         }
