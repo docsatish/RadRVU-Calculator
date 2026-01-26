@@ -1,8 +1,21 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { StudyDefinition } from "../types";
 
-// 1. UNIVERSAL KEY FIX: Checks Vite's variable first (for Netlify), then fallback to process.env (for Studio)
-const apiKey = import.meta.env.VITE_GEMINI_API_KEY || process.env.API_KEY;
+// 1. UNIVERSAL KEY FIX: Robust check to prevent crashes in Google AI Studio
+const getApiKey = () => {
+  try {
+    // Check if we are in a Vite environment (Netlify)
+    if (typeof import.meta !== 'undefined' && import.meta.env) {
+      return import.meta.env.VITE_GEMINI_API_KEY || process.env.API_KEY;
+    }
+    // Fallback for Google AI Studio or Node environments
+    return process.env.API_KEY;
+  } catch (e) {
+    return process.env.API_KEY;
+  }
+};
+
+const apiKey = getApiKey();
 
 export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDefinition[]) => {
   // 2. SAFETY CHECK: Ensure we have a key before starting
