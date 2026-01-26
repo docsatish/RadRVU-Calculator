@@ -1,10 +1,41 @@
-
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { INITIAL_STUDY_DB, DEFAULT_RVU_RATE } from './constants';
 import { ScannedStudy, CalculationResults, StudyDefinition } from './types';
 import { performOCRAndMatch } from './services/geminiService';
 import DashboardCards from './components/DashboardCards';
 import StudyTable from './components/StudyTable';
+
+const ABBREVIATIONS: Record<string, string> = {
+  'us': 'ultrasound',
+  'usg': 'ultrasound',
+  'ultrasonic': 'ultrasound',
+  'bx': 'biopsy',
+  'mammo': 'mammogram',
+  'mammography': 'mammogram',
+  'xr': 'xray',
+  'cr': 'xray',
+  'dr': 'xray',
+  'mr': 'mri',
+  'fu': 'followup',
+  'followup': 'followup',
+  'ltd': 'limited',
+  'scr': 'screening',
+  'scrn': 'screening',
+  'dx': 'diagnostic',
+  'diag': 'diagnostic',
+  'bil': 'bilateral',
+  'bilat': 'bilateral',
+  'unilat': 'unilateral',
+  'w': 'with',
+  'wo': 'without',
+  'cont': 'contrast',
+  'thor': 'thoracic',
+  'abd': 'abdomen',
+  'pelv': 'pelvis',
+  'ang': 'angio',
+  'cerv': 'cervical',
+  'lumb': 'lumbar',
+};
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'database'>('dashboard');
@@ -32,7 +63,36 @@ const App: React.FC = () => {
     };
   }, [studies, rvuRate]);
 
-  const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const normalizeToken = (t: string) => {
+    const low = t.toLowerCase().replace(/[^a-z0-9]/g, '');
+    return ABBREVIATIONS[low] || low;
+  };
+
+  const getSignificantWords = (s: string) => {
+    // List of words to ignore specifically for "Directional Neutrality"
+    const lateralIgnoreSet = new Set(['lt', 'rt', 'left', 'right']);
+    // Filler words that don't help in clinical matching
+    const fillerIgnoreSet = new Set(['the', 'and', 'for', 'or', 'of', 'in']);
+
+    return s.toLowerCase()
+      .split(/[^a-z0-9/]/) // Keep / for w/o etc
+      .filter(w => w.length > 0)
+      .map(w => {
+        const clean = w.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '');
+        return normalizeToken(clean);
+      })
+      .filter(w => w.length > 0 && !lateralIgnoreSet.has(w) && !fillerIgnoreSet.has(w));
+  };
+
+  const calculateWordOverlap = (s1: string, s2: string) => {
+    const words1 = new Set(getSignificantWords(s1));
+    const words2 = getSignificantWords(s2);
+    let matches = 0;
+    words2.forEach(w => {
+      if (words1.has(w)) matches++;
+    });
+    return matches;
+  };
 
   const processFile = useCallback(async (file: File) => {
     if (!file.type.startsWith('image/')) {
@@ -52,20 +112,34 @@ const App: React.FC = () => {
         
         const processed: ScannedStudy[] = extracted
           .map((ex: any, index: number) => {
-            // FUZZY MATCHING STRATEGY: 
-            // Normalize strings to ignore punctuation, spaces, and case differences
-            const normExCpt = normalize(ex.cpt);
-            const normExName = normalize(ex.name);
+            let bestMatch: StudyDefinition | null = null;
+            let highestOverlap = 0;
 
-            const dbMatch = db.find(s => normalize(s.cpt) === normExCpt) || 
-                          db.find(s => normalize(s.name) === normExName);
+            db.forEach(dbItem => {
+              const sigWordsInDb = getSignificantWords(dbItem.name);
+              const overlap = calculateWordOverlap(ex.originalText || ex.name, dbItem.name);
+              
+              // Dynamic threshold: If the database name is very short (e.g. 2 words),
+              // we shouldn't require 4 words overlap.
+              const threshold = Math.min(4, sigWordsInDb.length);
+              
+              if (overlap >= threshold && overlap > highestOverlap) {
+                highestOverlap = overlap;
+                bestMatch = dbItem;
+              }
+            });
+
+            if (!bestMatch) {
+              const normalizedExName = ex.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+              bestMatch = db.find(s => s.name.toLowerCase().replace(/[^a-z0-9]/g, '') === normalizedExName) || null;
+            }
             
-            if (dbMatch) {
+            if (bestMatch) {
               return {
                 id: `${Date.now()}-${index}-${Math.random()}`,
-                cpt: dbMatch.cpt, 
-                name: dbMatch.name, 
-                rvu: dbMatch.rvu,
+                cpt: bestMatch.cpt,
+                name: bestMatch.name, 
+                rvu: bestMatch.rvu,
                 quantity: ex.quantity || 1,
                 confidence: ex.confidence ?? 0.0,
                 originalText: ex.originalText
@@ -157,7 +231,10 @@ const App: React.FC = () => {
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-8">
           <div>
             <h1 className="text-4xl font-black text-slate-900 tracking-tight">RadRVU Pro</h1>
-            <p className="text-slate-500 mt-1 font-medium italic">Radiology Productivity Suite</p>
+            <div className="flex items-center gap-2 mt-1">
+              <p className="text-slate-500 font-medium italic">Radiology Productivity Suite</p>
+              <span className="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-widest">Abbreviation Aware Engine</span>
+            </div>
           </div>
           
           <div className="flex items-center gap-4 bg-white p-3 px-5 rounded-2xl shadow-sm border border-slate-200">
@@ -193,7 +270,7 @@ const App: React.FC = () => {
                   className={`bg-indigo-600 rounded-3xl p-8 text-white shadow-xl relative overflow-hidden transition-all duration-300 ${isDragging ? 'scale-105 ring-4 ring-indigo-200' : ''}`}
                 >
                   <h2 className="text-xl font-bold mb-4">Scan Worklist</h2>
-                  <p className="text-indigo-100 mb-6 text-sm leading-relaxed">Drop a screenshot here. AI matches studies strictly to your database.</p>
+                  <p className="text-indigo-100 mb-6 text-sm leading-relaxed">Drop a screenshot here. System understands "US" as Ultrasound, "BX" as Biopsy, etc.</p>
                   <label className="block w-full text-center py-4 bg-white text-indigo-600 rounded-xl font-bold cursor-pointer hover:bg-indigo-50 transition-all">
                     {isScanning ? "AI Analyzing..." : "Upload Screenshot"}
                     <input type="file" accept="image/*" className="hidden" onChange={(e) => {const f = e.target.files?.[0]; if(f) processFile(f);}} disabled={isScanning} />
@@ -219,19 +296,6 @@ const App: React.FC = () => {
                   </div>
                 )}
                 
-                <div className="bg-white p-6 rounded-2xl border border-slate-200">
-                  <h3 className="font-bold text-slate-800 mb-4 text-sm uppercase tracking-wider">Quick Match Stats</h3>
-                  <div className="space-y-2">
-                    <div className="flex justify-between text-sm py-2 border-b border-slate-50">
-                      <span className="text-slate-500">Database Size</span>
-                      <span className="font-mono font-bold">{db.length}</span>
-                    </div>
-                    <div className="flex justify-between text-sm py-2">
-                      <span className="text-slate-500">Valid Matches</span>
-                      <span className="font-mono font-bold text-indigo-600">{studies.length}</span>
-                    </div>
-                  </div>
-                </div>
                 {studies.length > 0 && (
                   <button onClick={clearAll} className="w-full py-2 text-slate-400 hover:text-red-500 text-xs font-bold uppercase tracking-widest transition-colors">Reset Worklist</button>
                 )}
@@ -258,7 +322,7 @@ const App: React.FC = () => {
             <div className="p-8 border-b border-slate-100 bg-slate-50/50 flex flex-col md:flex-row justify-between items-center gap-4">
               <div>
                 <h2 className="text-2xl font-bold text-slate-900">Reference RVU Database</h2>
-                <p className="text-slate-500 text-sm">Strictly used for AI matching. Upload your CPT/RVU master file.</p>
+                <p className="text-slate-500 text-sm">Matches are verified against this list after intelligent abbreviation expansion.</p>
               </div>
               <label className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-bold text-sm cursor-pointer hover:bg-indigo-700 transition-all flex items-center gap-2">
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>

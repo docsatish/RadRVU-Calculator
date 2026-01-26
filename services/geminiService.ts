@@ -1,29 +1,43 @@
-
 import { GoogleGenAI, Type } from "@google/genai";
 import { StudyDefinition } from "../types";
 
 export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDefinition[]) => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   
-  // Provide a concise representation of the current dynamic DB to the model
-  const studyListForContext = currentDb.map(s => `CPT: ${s.cpt} | NAME: ${s.name}`).join('\n');
+  const studyListForContext = currentDb.map(s => `NAME: ${s.name} | CPT: ${s.cpt}`).join('\n');
 
   const systemInstruction = `
     You are an expert Radiology Medical Coder and OCR specialist. 
     TASK: Analyze the provided PACS/Worklist image and extract procedure rows.
     
-    TWO-TIER MATCHING STRATEGY:
-    1. PRIMARY (Strict): Match by exact CPT code found in the image to the REFERENCE LIST.
-    2. SECONDARY (Inference): If the CPT is missing, partial, or contains OCR errors (e.g., 'O' instead of '0'), use the procedure description text and your medical knowledge to find the most likely match in the REFERENCE LIST.
+    ABBREVIATION AWARENESS:
+    Radiology worklists use many abbreviations. You must recognize and map them:
+    - US / USG -> Ultrasound
+    - CT / CAT -> Computed Tomography
+    - MR / MRI -> Magnetic Resonance Imaging
+    - BX -> Biopsy
+    - MAMMO -> Mammogram
+    - XR / CR / DR -> X-Ray
+    - LT / RT -> Left / Right (Ignore for matching purposes - Directional Neutrality)
+    - W / WO -> With / Without (Critical for matching)
+    - CONT -> Contrast
+    - BILAT / BIL -> Bilateral
+    - DX / SCR -> Diagnostic / Screening
+    - F/U -> Follow-up
+    
+    PRIMARY MATCHING RULE: 
+    - MATCH TO DESCRIPTION FIRST AND ONLY. 
+    - Use the raw procedure name found in the image to find the closest match in the REFERENCE LIST.
+    - Focus on clinical keywords (e.g., "Thoracic", "Chest", "Biopsy").
+    - If a match is found based on core clinical description, ignore directional differences.
+    
+    DATA ENRICHMENT:
+    - Once you identify the correct procedure in the REFERENCE LIST, provide the CPT code associated with that name in the list.
     
     STRICT RULES:
-    - EXTRACT: The "originalText" MUST be the raw text from the image, even if it has typos.
-    - MAP: The "cpt" and "name" fields in your JSON response MUST correspond to an entry in the REFERENCE LIST provided below.
+    - EXTRACT: The "originalText" MUST be the raw text from the image.
+    - MAP: The "name" and "cpt" fields in your JSON response MUST correspond to an entry from the provided REFERENCE LIST.
     - CONFIDENCE: Assign a score (0.0 - 1.0).
-        - 0.95+: Clear match on CPT and Name.
-        - 0.70-0.90: Match based on clear Name but slightly messy CPT.
-        - 0.40-0.69: Match based on partial fragments or strong medical inference.
-        - < 0.40: Highly uncertain; only include if you are reasonably confident it's the correct study.
     
     REFERENCE LIST:
     ${studyListForContext}
@@ -36,11 +50,11 @@ export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDe
     const rawImageData = base64Image.includes(',') ? base64Image.split(',')[1] : base64Image;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
+      model: 'gemini-3-flash-preview',
       contents: {
         parts: [
           { inlineData: { mimeType: 'image/jpeg', data: rawImageData } },
-          { text: "Extract radiology procedures. Use secondary matching strategy for partial/noisy text. Return valid JSON." }
+          { text: "Extract radiology procedures. Prioritize description matching. Expand abbreviations mentally to find the best match in the database list. Return valid JSON." }
         ]
       },
       config: {
@@ -54,10 +68,10 @@ export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDe
               items: {
                 type: Type.OBJECT,
                 properties: {
-                  cpt: { type: Type.STRING, description: "CPT code from the reference list" },
-                  name: { type: Type.STRING, description: "Name from the reference list" },
+                  cpt: { type: Type.STRING, description: "CPT code from the matched database entry" },
+                  name: { type: Type.STRING, description: "Name from the matched database entry" },
                   quantity: { type: Type.NUMBER, description: "Quantity" },
-                  originalText: { type: Type.STRING, description: "Raw text from scan" },
+                  originalText: { type: Type.STRING, description: "Raw text found on the image" },
                   confidence: { type: Type.NUMBER, description: "Confidence score" }
                 },
                 required: ["cpt", "name", "quantity", "originalText", "confidence"]
