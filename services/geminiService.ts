@@ -1,30 +1,10 @@
+
 import { GoogleGenAI, Type } from "@google/genai";
 import { StudyDefinition } from "../types";
 
 export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDefinition[]) => {
-  // --- START OF UNIVERSAL FIX (Placed inside the function) ---
-  let apiKey = '';
-  try {
-    // Check for Vite/Netlify environment variables first
-    if (typeof import.meta !== 'undefined' && import.meta.env) {
-      apiKey = import.meta.env.VITE_GEMINI_API_KEY || '';
-    }
-  } catch (e) {
-    // Ignore error if import.meta is not supported
-  }
-
-  // Fallback to process.env for Google AI Studio
-  if (!apiKey) {
-    apiKey = process.env.API_KEY || '';
-  }
-
-  if (!apiKey) {
-    console.error("API Key missing! Ensure VITE_GEMINI_API_KEY is in Netlify settings.");
-    return [];
-  }
-  // --- END OF UNIVERSAL FIX ---
-
-  const ai = new GoogleGenAI({ apiKey: apiKey });
+  // Use process.env.API_KEY directly as per guidelines
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   const studyListForContext = currentDb.map(s => `NAME: ${s.name} | CPT: ${s.cpt}`).join('\n');
 
   const systemInstruction = `
@@ -42,8 +22,9 @@ export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDe
     // Data Cleaning: Strip the metadata prefix if present
     const rawImageData = base64Image.includes(',') ? base64Image.split(',')[1] : base64Image;
 
+    // Using 'gemini-3-flash-preview' for efficient text extraction and matching
     const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash', // Use stable version for production reliability
+      model: 'gemini-3-flash-preview',
       contents: {
         parts: [
           { inlineData: { mimeType: 'image/jpeg', data: rawImageData } },
@@ -75,6 +56,7 @@ export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDe
       }
     });
 
+    // Access .text property directly (not a method)
     const data = JSON.parse(response.text || '{"studies": []}');
     return data.studies || [];
   } catch (error) {
