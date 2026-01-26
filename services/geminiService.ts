@@ -1,56 +1,46 @@
+
 import { GoogleGenAI, Type } from "@google/genai";
 import { StudyDefinition } from "../types";
 
-// 1. UNIVERSAL KEY FIX: Robust check to prevent crashes in Google AI Studio
-const getApiKey = () => {
-  try {
-    // Check if we are in a Vite environment (Netlify)
-    if (typeof import.meta !== 'undefined' && import.meta.env) {
-      return import.meta.env.VITE_GEMINI_API_KEY || process.env.API_KEY;
-    }
-    // Fallback for Google AI Studio or Node environments
-    return process.env.API_KEY;
-  } catch (e) {
-    return process.env.API_KEY;
-  }
-};
-
-const apiKey = getApiKey();
-
 export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDefinition[]) => {
-  // 2. SAFETY CHECK: Ensure we have a key before starting
-  if (!apiKey) {
-    console.error("API Key missing! Add VITE_GEMINI_API_KEY to Netlify environment variables.");
-    throw new Error("AI analysis failed - API configuration error.");
-  }
-
-  const ai = new GoogleGenAI({ apiKey: apiKey });
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   
-  const studyListForContext = currentDb.map(s => `${s.cpt}: ${s.name} (${s.rvu} RVU)`).join('\n');
+  // Provide a concise representation of the current dynamic DB to the model
+  const studyListForContext = currentDb.map(s => `CPT: ${s.cpt} | NAME: ${s.name}`).join('\n');
 
   const systemInstruction = `
-    You are a professional Radiology Medical Coder.
-    Analyze the provided image (worklist screenshot).
-    1. Extract all radiology studies performed.
-    2. Match each extracted study to the most likely CPT code from the PROVIDED REFERENCE LIST below.
-    3. The PROVIDED REFERENCE LIST is the definitive source for CPT codes and names.
-    4. Provide the quantity (usually 1 per row unless specified).
-    5. Output JSON only.
+    You are an expert Radiology Medical Coder and OCR specialist. 
+    TASK: Analyze the provided PACS/Worklist image and extract procedure rows.
+    
+    TWO-TIER MATCHING STRATEGY:
+    1. PRIMARY (Strict): Match by exact CPT code found in the image to the REFERENCE LIST.
+    2. SECONDARY (Inference): If the CPT is missing, partial, or contains OCR errors (e.g., 'O' instead of '0'), use the procedure description text and your medical knowledge to find the most likely match in the REFERENCE LIST.
+    
+    STRICT RULES:
+    - EXTRACT: The "originalText" MUST be the raw text from the image, even if it has typos.
+    - MAP: The "cpt" and "name" fields in your JSON response MUST correspond to an entry in the REFERENCE LIST provided below.
+    - CONFIDENCE: Assign a score (0.0 - 1.0).
+        - 0.95+: Clear match on CPT and Name.
+        - 0.70-0.90: Match based on clear Name but slightly messy CPT.
+        - 0.40-0.69: Match based on partial fragments or strong medical inference.
+        - < 0.40: Highly uncertain; only include if you are reasonably confident it's the correct study.
     
     REFERENCE LIST:
     ${studyListForContext}
+
+    OUTPUT:
+    Return a JSON object with a "studies" array.
   `;
 
   try {
-    // 3. DATA CLEANING: Ensure we only send the raw base64 data
     const rawImageData = base64Image.includes(',') ? base64Image.split(',')[1] : base64Image;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash', // Updated to latest stable model
+      model: 'gemini-2.0-flash',
       contents: {
         parts: [
           { inlineData: { mimeType: 'image/jpeg', data: rawImageData } },
-          { text: "Extract all radiology procedures from this list and return as JSON. Match them to the provided REFERENCE LIST." }
+          { text: "Extract radiology procedures. Use secondary matching strategy for partial/noisy text. Return valid JSON." }
         ]
       },
       config: {
@@ -65,12 +55,12 @@ export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDe
                 type: Type.OBJECT,
                 properties: {
                   cpt: { type: Type.STRING, description: "CPT code from the reference list" },
-                  name: { type: Type.STRING, description: "Name as it appears in the reference list" },
-                  quantity: { type: Type.NUMBER, description: "Number of times this study appears" },
-                  originalText: { type: Type.STRING, description: "Raw text found in image" },
-                  confidence: { type: Type.NUMBER, description: "Matching confidence 0-1" }
+                  name: { type: Type.STRING, description: "Name from the reference list" },
+                  quantity: { type: Type.NUMBER, description: "Quantity" },
+                  originalText: { type: Type.STRING, description: "Raw text from scan" },
+                  confidence: { type: Type.NUMBER, description: "Confidence score" }
                 },
-                required: ["cpt", "name", "quantity"]
+                required: ["cpt", "name", "quantity", "originalText", "confidence"]
               }
             }
           }
@@ -78,11 +68,17 @@ export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDe
       }
     });
 
-    const data = JSON.parse(response.text || '{"studies": []}');
-    return data.studies;
+    if (!response.text) return [];
+
+    let jsonStr = response.text.trim();
+    if (jsonStr.startsWith('```')) {
+      jsonStr = jsonStr.replace(/^```json/, '').replace(/```$/, '').trim();
+    }
+
+    const data = JSON.parse(jsonStr);
+    return data.studies || [];
   } catch (error) {
-    // 4. ERROR LOGGING: This prevents the app from crashing silently
     console.error("Gemini OCR Error:", error);
-    throw error;
+    return [];
   }
 };

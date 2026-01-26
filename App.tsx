@@ -32,6 +32,8 @@ const App: React.FC = () => {
     };
   }, [studies, rvuRate]);
 
+  const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+
   const processFile = useCallback(async (file: File) => {
     if (!file.type.startsWith('image/')) {
       setError("Please upload an image file.");
@@ -44,22 +46,34 @@ const App: React.FC = () => {
     const reader = new FileReader();
     reader.onloadend = async () => {
       const base64String = reader.result as string;
-      setLastImage(base64String); // Store for preview
+      setLastImage(base64String);
       try {
         const extracted = await performOCRAndMatch(base64String, db);
         
-        const processed: ScannedStudy[] = extracted.map((ex: any, index: number) => {
-          const dbMatch = db.find(s => s.cpt === ex.cpt || s.name === ex.name);
-          return {
-            id: `${Date.now()}-${index}-${Math.random()}`,
-            cpt: ex.cpt || 'N/A',
-            name: dbMatch?.name || ex.name,
-            rvu: dbMatch?.rvu || 0,
-            quantity: ex.quantity || 1,
-            confidence: ex.confidence || 0.5,
-            originalText: ex.originalText
-          };
-        });
+        const processed: ScannedStudy[] = extracted
+          .map((ex: any, index: number) => {
+            // FUZZY MATCHING STRATEGY: 
+            // Normalize strings to ignore punctuation, spaces, and case differences
+            const normExCpt = normalize(ex.cpt);
+            const normExName = normalize(ex.name);
+
+            const dbMatch = db.find(s => normalize(s.cpt) === normExCpt) || 
+                          db.find(s => normalize(s.name) === normExName);
+            
+            if (dbMatch) {
+              return {
+                id: `${Date.now()}-${index}-${Math.random()}`,
+                cpt: dbMatch.cpt, 
+                name: dbMatch.name, 
+                rvu: dbMatch.rvu,
+                quantity: ex.quantity || 1,
+                confidence: ex.confidence ?? 0.0,
+                originalText: ex.originalText
+              };
+            }
+            return null;
+          })
+          .filter(Boolean) as ScannedStudy[];
 
         setStudies(prev => [...prev, ...processed]);
       } catch (err) {
@@ -105,7 +119,7 @@ const App: React.FC = () => {
       const newDb = parseCSV(content);
       if (newDb.length > 0) {
         setDb(newDb);
-        alert(`Imported ${newDb.length} codes.`);
+        alert(`Successfully imported ${newDb.length} codes into the RVU database.`);
       }
     };
     reader.readAsText(file);
@@ -119,7 +133,6 @@ const App: React.FC = () => {
     }
   };
 
-  // Panning Logic
   const handleMouseDown = () => zoom > 1 && setIsPanning(true);
   const handleMouseUp = () => setIsPanning(false);
   const handleMouseMove = (e: React.MouseEvent) => {
@@ -180,7 +193,7 @@ const App: React.FC = () => {
                   className={`bg-indigo-600 rounded-3xl p-8 text-white shadow-xl relative overflow-hidden transition-all duration-300 ${isDragging ? 'scale-105 ring-4 ring-indigo-200' : ''}`}
                 >
                   <h2 className="text-xl font-bold mb-4">Scan Worklist</h2>
-                  <p className="text-indigo-100 mb-6 text-sm leading-relaxed">Drop a screenshot here. AI matches studies to your database.</p>
+                  <p className="text-indigo-100 mb-6 text-sm leading-relaxed">Drop a screenshot here. AI matches studies strictly to your database.</p>
                   <label className="block w-full text-center py-4 bg-white text-indigo-600 rounded-xl font-bold cursor-pointer hover:bg-indigo-50 transition-all">
                     {isScanning ? "AI Analyzing..." : "Upload Screenshot"}
                     <input type="file" accept="image/*" className="hidden" onChange={(e) => {const f = e.target.files?.[0]; if(f) processFile(f);}} disabled={isScanning} />
@@ -188,7 +201,6 @@ const App: React.FC = () => {
                   {error && <div className="mt-4 p-3 bg-red-500/20 rounded-lg text-xs font-bold text-red-50">{error}</div>}
                 </div>
 
-                {/* Last Scanned Image Preview */}
                 {lastImage && (
                   <div className="bg-white p-4 rounded-3xl border border-slate-200 shadow-sm overflow-hidden group">
                     <h3 className="font-bold text-slate-800 mb-3 text-xs uppercase tracking-wider px-2">Current Worklist Image</h3>
@@ -211,11 +223,11 @@ const App: React.FC = () => {
                   <h3 className="font-bold text-slate-800 mb-4 text-sm uppercase tracking-wider">Quick Match Stats</h3>
                   <div className="space-y-2">
                     <div className="flex justify-between text-sm py-2 border-b border-slate-50">
-                      <span className="text-slate-500">Known Codes</span>
+                      <span className="text-slate-500">Database Size</span>
                       <span className="font-mono font-bold">{db.length}</span>
                     </div>
                     <div className="flex justify-between text-sm py-2">
-                      <span className="text-slate-500">Worklist Items</span>
+                      <span className="text-slate-500">Valid Matches</span>
                       <span className="font-mono font-bold text-indigo-600">{studies.length}</span>
                     </div>
                   </div>
@@ -246,10 +258,10 @@ const App: React.FC = () => {
             <div className="p-8 border-b border-slate-100 bg-slate-50/50 flex flex-col md:flex-row justify-between items-center gap-4">
               <div>
                 <h2 className="text-2xl font-bold text-slate-900">Reference RVU Database</h2>
-                <p className="text-slate-500 text-sm">Upload your organization's CPT/RVU master file here.</p>
+                <p className="text-slate-500 text-sm">Strictly used for AI matching. Upload your CPT/RVU master file.</p>
               </div>
               <label className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-bold text-sm cursor-pointer hover:bg-indigo-700 transition-all flex items-center gap-2">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
                 Import CSV Database
                 <input type="file" accept=".csv" className="hidden" onChange={handleCSVUpload} />
               </label>
@@ -278,10 +290,8 @@ const App: React.FC = () => {
         )}
       </main>
 
-      {/* Image Inspection Modal */}
       {isModalOpen && lastImage && (
         <div className="fixed inset-0 z-50 flex flex-col bg-black/90 backdrop-blur-md">
-          {/* Modal Header Controls */}
           <div className="flex items-center justify-between p-4 bg-white/10 backdrop-blur-md border-b border-white/10">
             <h3 className="text-white font-bold px-4">Image Inspector</h3>
             <div className="flex items-center gap-6">
@@ -304,7 +314,6 @@ const App: React.FC = () => {
             </div>
           </div>
 
-          {/* Canvas Area */}
           <div 
             className="flex-1 overflow-hidden relative cursor-move flex items-center justify-center"
             onMouseDown={handleMouseDown}
@@ -328,7 +337,6 @@ const App: React.FC = () => {
             </div>
           </div>
 
-          {/* Status Bar */}
           <div className="p-3 bg-white/5 text-center text-white/40 text-[10px] uppercase tracking-[0.2em] font-bold">
             Drag to pan when zoomed • Use slider to adjust focus
           </div>
