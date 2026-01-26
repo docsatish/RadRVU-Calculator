@@ -1,0 +1,7 @@
+{
+  "name": "Radiology RVU Calculator",
+  "description": "A professional tool for radiologists to scan worklists, extract study data via AI, and calculate total Work RVUs and daily earnings based on a custom conversion factor.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
