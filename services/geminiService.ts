@@ -1,30 +1,10 @@
+
 import { GoogleGenAI, Type } from "@google/genai";
 import { StudyDefinition } from "../types";
 
 export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDefinition[]) => {
-  // --- UNIVERSAL KEY FIX START ---
-  let apiKey = '';
-  try {
-    // Vite/Netlify check
-    if (typeof import.meta !== 'undefined' && import.meta.env) {
-      apiKey = import.meta.env.VITE_GEMINI_API_KEY || '';
-    }
-  } catch (e) {
-    // Fallback if import.meta is unsupported
-  }
-
-  // Google AI Studio fallback
-  if (!apiKey) {
-    apiKey = process.env.API_KEY || '';
-  }
-
-  if (!apiKey) {
-    console.error("No API key found. Check Netlify Environment Variables.");
-    return [];
-  }
-  // --- UNIVERSAL KEY FIX END ---
-
-  const ai = new GoogleGenAI({ apiKey: apiKey });
+  // Use process.env.API_KEY directly as per @google/genai guidelines to avoid ImportMeta errors.
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   const studyListForContext = currentDb.map(s => `NAME: ${s.name} | CPT: ${s.cpt}`).join('\n');
 
   const systemInstruction = `
@@ -41,8 +21,9 @@ export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDe
   try {
     const rawImageData = base64Image.includes(',') ? base64Image.split(',')[1] : base64Image;
 
+    // Updated model to gemini-3-flash-preview as per the task type (basic text/OCR task) guidelines.
     const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash', // Switched to stable 2.0 for production reliability
+      model: 'gemini-3-flash-preview',
       contents: {
         parts: [
           { inlineData: { mimeType: 'image/jpeg', data: rawImageData } },

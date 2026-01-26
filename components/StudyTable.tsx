@@ -1,3 +1,4 @@
+
 import React, { useState, useMemo } from 'react';
 import { ScannedStudy } from '../types';
 
@@ -31,6 +32,13 @@ const StudyTable: React.FC<Props> = ({ studies, onDelete }) => {
     return Array.from(groupedMap.values());
   }, [studies, isGrouped]);
 
+  const totals = useMemo(() => {
+    return studies.reduce((acc, s) => ({
+      rvu: acc.rvu + (s.rvu * s.quantity),
+      qty: acc.qty + s.quantity
+    }), { rvu: 0, qty: 0 });
+  }, [studies]);
+
   if (studies.length === 0) return null;
 
   const getConfidenceColor = (score: number) => {
@@ -41,7 +49,6 @@ const StudyTable: React.FC<Props> = ({ studies, onDelete }) => {
 
   const handleDelete = (study: ScannedStudy) => {
     if (isGrouped) {
-      // If grouped, find all original IDs that match this CPT/Name and delete them
       const idsToDelete = studies
         .filter(s => s.cpt === study.cpt && s.name === study.name)
         .map(s => s.id);
@@ -135,6 +142,27 @@ const StudyTable: React.FC<Props> = ({ studies, onDelete }) => {
               </tr>
             ))}
           </tbody>
+          <tfoot className="bg-slate-50/80 border-t border-slate-200">
+            <tr>
+              <td colSpan={2} className="px-6 py-4 text-sm font-bold text-slate-500 uppercase tracking-wider text-right">
+                Scan Totals
+              </td>
+              <td className="px-6 py-4">
+                <div className="flex flex-col">
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-tighter">Studies</span>
+                  <span className="text-sm font-black text-slate-900">{totals.qty}</span>
+                </div>
+              </td>
+              <td className="px-6 py-4 text-sm text-slate-400 font-mono">---</td>
+              <td className="px-6 py-4">
+                <div className="flex flex-col">
+                  <span className="text-[10px] font-black text-indigo-400 uppercase tracking-tighter">Total wRVU</span>
+                  <span className="text-base font-black text-indigo-600 font-mono">{totals.rvu.toFixed(2)}</span>
+                </div>
+              </td>
+              <td className="px-6 py-4"></td>
+            </tr>
+          </tfoot>
         </table>
       </div>
     </div>
