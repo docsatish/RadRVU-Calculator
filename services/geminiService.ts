@@ -1,11 +1,30 @@
-
 import { GoogleGenAI, Type } from "@google/genai";
 import { StudyDefinition } from "../types";
 
 export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDefinition[]) => {
-  // Initialization following world-class senior engineer standards and SDK rules
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  
+  // --- UNIVERSAL KEY FIX START ---
+  let apiKey = '';
+  try {
+    // Vite/Netlify check
+    if (typeof import.meta !== 'undefined' && import.meta.env) {
+      apiKey = import.meta.env.VITE_GEMINI_API_KEY || '';
+    }
+  } catch (e) {
+    // Fallback if import.meta is unsupported
+  }
+
+  // Google AI Studio fallback
+  if (!apiKey) {
+    apiKey = process.env.API_KEY || '';
+  }
+
+  if (!apiKey) {
+    console.error("No API key found. Check Netlify Environment Variables.");
+    return [];
+  }
+  // --- UNIVERSAL KEY FIX END ---
+
+  const ai = new GoogleGenAI({ apiKey: apiKey });
   const studyListForContext = currentDb.map(s => `NAME: ${s.name} | CPT: ${s.cpt}`).join('\n');
 
   const systemInstruction = `
@@ -21,17 +40,14 @@ export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDe
   `;
 
   try {
-    // Extract MIME type and raw data from the data URL
-    const mimeMatch = base64Image.match(/^data:(image\/\w+);base64,/);
-    const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
     const rawImageData = base64Image.includes(',') ? base64Image.split(',')[1] : base64Image;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
+      model: 'gemini-2.0-flash', // Switched to stable 2.0 for production reliability
       contents: [
         {
           parts: [
-            { inlineData: { mimeType, data: rawImageData } },
+            { inlineData: { mimeType: 'image/jpeg', data: rawImageData } },
             { text: "Extract all radiology procedures individually. Do not combine them. Return as JSON." }
           ]
         }
@@ -61,10 +77,8 @@ export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDe
       }
     });
 
-    // Extract text directly from property per SDK requirements
-    const jsonStr = response.text || '{"studies": []}';
-    const data = JSON.parse(jsonStr);
-    
+    // Directly access the .text property
+    const data = JSON.parse(response.text || '{"studies": []}');
     return data.studies || [];
   } catch (error) {
     console.error("Gemini OCR Error:", error);
