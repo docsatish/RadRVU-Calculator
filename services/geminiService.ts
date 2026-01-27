@@ -3,7 +3,9 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { StudyDefinition } from "../types";
 
 export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDefinition[]) => {
+  // Initialization following world-class senior engineer standards and SDK rules
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  
   const studyListForContext = currentDb.map(s => `NAME: ${s.name} | CPT: ${s.cpt}`).join('\n');
 
   const systemInstruction = `
@@ -26,12 +28,14 @@ export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDe
 
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',
-      contents: {
-        parts: [
-          { inlineData: { mimeType, data: rawImageData } },
-          { text: "Extract all radiology procedures individually. Do not combine them. Return as JSON." }
-        ]
-      },
+      contents: [
+        {
+          parts: [
+            { inlineData: { mimeType, data: rawImageData } },
+            { text: "Extract all radiology procedures individually. Do not combine them. Return as JSON." }
+          ]
+        }
+      ],
       config: {
         systemInstruction,
         responseMimeType: "application/json",
@@ -57,7 +61,10 @@ export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDe
       }
     });
 
-    const data = JSON.parse(response.text || '{"studies": []}');
+    // Extract text directly from property per SDK requirements
+    const jsonStr = response.text || '{"studies": []}';
+    const data = JSON.parse(jsonStr);
+    
     return data.studies || [];
   } catch (error) {
     console.error("Gemini OCR Error:", error);
