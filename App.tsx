@@ -1,9 +1,13 @@
+
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { INITIAL_STUDY_DB, DEFAULT_RVU_RATE } from './constants';
 import { ScannedStudy, CalculationResults, StudyDefinition } from './types';
 import { performOCRAndMatch } from './services/geminiService';
 import DashboardCards from './components/DashboardCards';
 import StudyTable from './components/StudyTable';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
+import heic2any from 'heic2any';
 
 const ABBREVIATIONS: Record<string, string> = {
   'us': 'ultrasound',
@@ -41,18 +45,74 @@ const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'database'>('dashboard');
   const [db, setDb] = useState<StudyDefinition[]>(INITIAL_STUDY_DB);
   const [studies, setStudies] = useState<ScannedStudy[]>([]);
+  const [isGrouped, setIsGrouped] = useState(false);
   const [rvuRate, setRvuRate] = useState<number>(DEFAULT_RVU_RATE);
   const [isScanning, setIsScanning] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Report Metadata
+  const [doctorName, setDoctorName] = useState(localStorage.getItem('rad_doctorName') || '');
+  const [groupName, setGroupName] = useState(localStorage.getItem('rad_groupName') || '');
+  const [hospitalName, setHospitalName] = useState(localStorage.getItem('rad_hospitalName') || '');
   
-  // Image Inspection State
+  // Image Inspection State - Only in memory to avoid QuotaExceededError
   const [lastImage, setLastImage] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
   const imageRef = useRef<HTMLImageElement>(null);
+
+  // Persistence Effects
+  useEffect(() => {
+    localStorage.setItem('rad_doctorName', doctorName);
+    localStorage.setItem('rad_groupName', groupName);
+    localStorage.setItem('rad_hospitalName', hospitalName);
+  }, [doctorName, groupName, hospitalName]);
+
+  useEffect(() => {
+    const savedStudies = localStorage.getItem('rad_studies');
+    if (savedStudies) {
+      try {
+        setStudies(JSON.parse(savedStudies));
+      } catch (e) {
+        console.error("Failed to load saved studies", e);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('rad_studies', JSON.stringify(studies));
+    } catch (e) {
+      console.warn("Quota exceeded while saving studies. Clearing oldest entries might be required.", e);
+    }
+  }, [studies]);
+
+  const displayStudies = useMemo(() => {
+    if (!isGrouped) return studies;
+
+    const groupedMap = new Map<string, ScannedStudy>();
+
+    studies.forEach((s) => {
+      const key = `${s.cpt}-${s.name}`;
+      const existing = groupedMap.get(key);
+      if (existing) {
+        groupedMap.set(key, {
+          ...existing,
+          quantity: existing.quantity + s.quantity,
+          confidence: Math.max(existing.confidence, s.confidence),
+          originalText: undefined 
+        });
+      } else {
+        groupedMap.set(key, { ...s });
+      }
+    });
+
+    return Array.from(groupedMap.values());
+  }, [studies, isGrouped]);
 
   const results = useMemo((): CalculationResults => {
     const totalRVU = studies.reduce((acc, s) => acc + (s.rvu * s.quantity), 0);
@@ -69,13 +129,11 @@ const App: React.FC = () => {
   };
 
   const getSignificantWords = (s: string) => {
-    // List of words to ignore specifically for "Directional Neutrality"
     const lateralIgnoreSet = new Set(['lt', 'rt', 'left', 'right']);
-    // Filler words that don't help in clinical matching
     const fillerIgnoreSet = new Set(['the', 'and', 'for', 'or', 'of', 'in']);
 
     return s.toLowerCase()
-      .split(/[^a-z0-9/]/) // Keep / for w/o etc
+      .split(/[^a-z0-9/]/)
       .filter(w => w.length > 0)
       .map(w => {
         const clean = w.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '');
@@ -95,13 +153,37 @@ const App: React.FC = () => {
   };
 
   const processFile = useCallback(async (file: File) => {
-    if (!file.type.startsWith('image/')) {
-      setError("Please upload an image file.");
-      return;
-    }
-
     setIsScanning(true);
     setError(null);
+
+    let targetFile = file;
+
+    // Detect HEIC and convert to JPEG
+    const isHeic = file.type === 'image/heic' || file.type === 'image/heif' || 
+                   file.name.toLowerCase().endsWith('.heic') || file.name.toLowerCase().endsWith('.heif');
+
+    if (isHeic) {
+      try {
+        const convertedBlob = await heic2any({
+          blob: file,
+          toType: 'image/jpeg',
+          quality: 0.8
+        });
+        const blob = Array.isArray(convertedBlob) ? convertedBlob[0] : convertedBlob;
+        targetFile = new File([blob], file.name.replace(/\.[^/.]+$/, "") + ".jpg", { type: 'image/jpeg' });
+      } catch (err) {
+        console.error("HEIC Conversion error:", err);
+        setError("Could not convert HEIC file. Please use JPEG or PNG.");
+        setIsScanning(false);
+        return;
+      }
+    }
+
+    if (!targetFile.type.startsWith('image/')) {
+      setError("Please upload a valid image file.");
+      setIsScanning(false);
+      return;
+    }
 
     const reader = new FileReader();
     reader.onloadend = async () => {
@@ -118,9 +200,6 @@ const App: React.FC = () => {
             db.forEach(dbItem => {
               const sigWordsInDb = getSignificantWords(dbItem.name);
               const overlap = calculateWordOverlap(ex.originalText || ex.name, dbItem.name);
-              
-              // Dynamic threshold: If the database name is very short (e.g. 2 words),
-              // we shouldn't require 4 words overlap.
               const threshold = Math.min(4, sigWordsInDb.length);
               
               if (overlap >= threshold && overlap > highestOverlap) {
@@ -157,46 +236,133 @@ const App: React.FC = () => {
         setIsScanning(false);
       }
     };
-    reader.readAsDataURL(file);
+    reader.readAsDataURL(targetFile);
   }, [db]);
 
-  const parseCSV = (content: string): StudyDefinition[] => {
-    const lines = content.split('\n');
-    const results: StudyDefinition[] = [];
-    const regex = /(".*?"|[^",\r\n]+)(?=\s*,|\s*$)/g;
+  const generatePDF = async () => {
+    if (studies.length === 0) return;
+    setIsExporting(true);
+    
+    try {
+      const doc = new jsPDF();
+      const timestamp = new Date().toLocaleString();
 
-    for (let i = 1; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (!line) continue;
+      // Header
+      doc.setFontSize(22);
+      doc.setTextColor(79, 70, 229);
+      doc.text("RadRVU Professional Report", 14, 22);
       
-      const matches = line.match(regex);
-      if (matches && matches.length >= 3) {
-        const cpt = matches[0].replace(/"/g, '').trim();
-        const name = matches[1].replace(/"/g, '').trim();
-        const rvuValue = matches[2].replace(/"/g, '').trim().replace(/,/g, '');
-        const rvu = parseFloat(rvuValue);
+      doc.setFontSize(10);
+      doc.setTextColor(100, 116, 139);
+      doc.text(`Generated: ${timestamp}`, 14, 28);
+
+      // Metadata Box
+      doc.setDrawColor(226, 232, 240);
+      doc.setFillColor(248, 250, 252);
+      doc.roundedRect(14, 35, 182, 35, 3, 3, 'FD');
+
+      doc.setFontSize(10);
+      doc.setTextColor(71, 85, 105);
+      doc.setFont("helvetica", "bold");
+      doc.text("PROVIDER INFORMATION", 18, 43);
+      
+      doc.setFont("helvetica", "normal");
+      doc.text(`Physician: ${doctorName || 'Not Specified'}`, 18, 50);
+      doc.text(`Radiology Group: ${groupName || 'Not Specified'}`, 18, 57);
+      doc.text(`Hospital/Facility: ${hospitalName || 'Not Specified'}`, 18, 64);
+
+      // Summary Panel
+      doc.setFont("helvetica", "bold");
+      doc.text("PRODUCTIVITY SUMMARY", 14, 82);
+      
+      const summaryData = [
+        ["Total Studies", "Total wRVUs", "Conversion Rate", "Est. Earnings"],
+        [
+          results.studyCount.toString(),
+          results.totalRVU.toFixed(2),
+          `$${rvuRate.toFixed(2)}`,
+          `$${results.totalEarnings.toLocaleString(undefined, { minimumFractionDigits: 2 })}`
+        ]
+      ];
+
+      autoTable(doc, {
+        startY: 86,
+        head: [summaryData[0]],
+        body: [summaryData[1]],
+        theme: 'grid',
+        headStyles: { fillColor: [79, 70, 229], fontSize: 9, halign: 'center' },
+        bodyStyles: { fontSize: 11, fontStyle: 'bold', halign: 'center', textColor: [30, 41, 59] }
+      });
+
+      // Study Table (Consolidated or Individual based on UI)
+      const tableData = displayStudies.map(s => [
+        s.cpt,
+        isGrouped ? s.name : (s.originalText || s.name),
+        s.quantity.toString(),
+        s.rvu.toFixed(2),
+        (s.rvu * s.quantity).toFixed(2)
+      ]);
+
+      autoTable(doc, {
+        startY: (doc as any).lastAutoTable.finalY + 15,
+        head: [['CPT Code', isGrouped ? 'Procedure Category' : 'Extracted Procedure', 'Qty', 'wRVU', 'Total']],
+        body: tableData,
+        headStyles: { fillColor: [51, 65, 85], fontSize: 9 },
+        bodyStyles: { fontSize: 8 },
+        columnStyles: {
+          0: { cellWidth: 30 },
+          2: { cellWidth: 15, halign: 'center' },
+          3: { cellWidth: 20, halign: 'right' },
+          4: { cellWidth: 25, halign: 'right' }
+        }
+      });
+
+      // Image Page - Audit Evidence
+      if (lastImage) {
+        doc.addPage();
+        doc.setFontSize(16);
+        doc.setTextColor(30, 41, 59);
+        doc.setFont("helvetica", "bold");
+        doc.text("Worklist Audit Evidence", 14, 20);
         
-        if (!isNaN(rvu)) {
-          results.push({ cpt, name, rvu, category: 'Other' });
+        doc.setFontSize(9);
+        doc.setFont("helvetica", "normal");
+        doc.setTextColor(100, 116, 139);
+        doc.text("The following image was used for AI data extraction and CPT matching.", 14, 26);
+        
+        try {
+          const mimeType = lastImage.substring(5, lastImage.indexOf(';'));
+          let imgFormat: 'JPEG' | 'PNG' | 'WEBP' = 'JPEG';
+          if (mimeType === 'image/png') imgFormat = 'PNG';
+          else if (mimeType === 'image/webp') imgFormat = 'WEBP';
+
+          const imgProps = doc.getImageProperties(lastImage);
+          const pdfPageWidth = doc.internal.pageSize.getWidth() - 28;
+          const pdfPageHeight = doc.internal.pageSize.getHeight() - 50;
+          
+          let displayWidth = pdfPageWidth;
+          let displayHeight = (imgProps.height * displayWidth) / imgProps.width;
+
+          if (displayHeight > pdfPageHeight) {
+            displayHeight = pdfPageHeight;
+            displayWidth = (imgProps.width * displayHeight) / imgProps.height;
+          }
+
+          doc.addImage(lastImage, imgFormat, 14, 35, displayWidth, displayHeight, undefined, 'FAST');
+        } catch (e) {
+          console.error("PDF Image Inclusion Error:", e);
+          doc.setTextColor(239, 68, 68);
+          doc.text("Warning: Worklist image could not be embedded.", 14, 45);
         }
       }
-    }
-    return results;
-  };
 
-  const handleCSVUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const content = e.target?.result as string;
-      const newDb = parseCSV(content);
-      if (newDb.length > 0) {
-        setDb(newDb);
-        alert(`Successfully imported ${newDb.length} codes into the RVU database.`);
-      }
-    };
-    reader.readAsText(file);
+      doc.save(`RVU_Report_${isGrouped ? 'Consolidated_' : ''}${new Date().toISOString().split('T')[0]}.pdf`);
+    } catch (err) {
+      console.error("PDF Export Error", err);
+      alert("Failed to generate PDF. Check console for details.");
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   const deleteStudy = (id: string) => setStudies(prev => prev.filter(s => s.id !== id));
@@ -204,6 +370,7 @@ const App: React.FC = () => {
     if (window.confirm("Clear today's worklist?")) {
       setStudies([]);
       setLastImage(null);
+      localStorage.removeItem('rad_studies');
     }
   };
 
@@ -233,7 +400,7 @@ const App: React.FC = () => {
             <h1 className="text-4xl font-black text-slate-900 tracking-tight">RadRVU Pro</h1>
             <div className="flex items-center gap-2 mt-1">
               <p className="text-slate-500 font-medium italic">Radiology Productivity Suite</p>
-              <span className="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-widest">Abbreviation Aware Engine</span>
+              <span className="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-widest">v2.5 Professional</span>
             </div>
           </div>
           
@@ -261,8 +428,42 @@ const App: React.FC = () => {
         {activeTab === 'dashboard' ? (
           <>
             <DashboardCards totalRVU={results.totalRVU} totalEarnings={results.totalEarnings} studyCount={results.studyCount} rvuRate={rvuRate} />
+            
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
               <div className="lg:col-span-1 space-y-6">
+                <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm">
+                  <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest mb-4">Report Details</h3>
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-[10px] font-black text-slate-400 uppercase tracking-tighter mb-1">Doctor Name</label>
+                      <input 
+                        value={doctorName} 
+                        onChange={e => setDoctorName(e.target.value)}
+                        placeholder="Dr. Jane Smith"
+                        className="w-full px-4 py-2 bg-slate-50 border border-slate-100 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-black text-slate-400 uppercase tracking-tighter mb-1">Radiology Group</label>
+                      <input 
+                        value={groupName} 
+                        onChange={e => setGroupName(e.target.value)}
+                        placeholder="Elite Imaging LLC"
+                        className="w-full px-4 py-2 bg-slate-50 border border-slate-100 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-black text-slate-400 uppercase tracking-tighter mb-1">Hospital / Clinic</label>
+                      <input 
+                        value={hospitalName} 
+                        onChange={e => setHospitalName(e.target.value)}
+                        placeholder="General Hospital"
+                        className="w-full px-4 py-2 bg-slate-50 border border-slate-100 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                      />
+                    </div>
+                  </div>
+                </div>
+
                 <div 
                   onDragOver={(e) => {e.preventDefault(); setIsDragging(true);}}
                   onDragLeave={() => setIsDragging(false)}
@@ -270,43 +471,66 @@ const App: React.FC = () => {
                   className={`bg-indigo-600 rounded-3xl p-8 text-white shadow-xl relative overflow-hidden transition-all duration-300 ${isDragging ? 'scale-105 ring-4 ring-indigo-200' : ''}`}
                 >
                   <h2 className="text-xl font-bold mb-4">Scan Worklist</h2>
-                  <p className="text-indigo-100 mb-6 text-sm leading-relaxed">Drop a screenshot here. System understands "US" as Ultrasound, "BX" as Biopsy, etc.</p>
+                  <p className="text-indigo-100 mb-6 text-sm leading-relaxed">Drop a screenshot here (JPG, PNG, HEIC).</p>
                   <label className="block w-full text-center py-4 bg-white text-indigo-600 rounded-xl font-bold cursor-pointer hover:bg-indigo-50 transition-all">
-                    {isScanning ? "AI Analyzing..." : "Upload Screenshot"}
-                    <input type="file" accept="image/*" className="hidden" onChange={(e) => {const f = e.target.files?.[0]; if(f) processFile(f);}} disabled={isScanning} />
+                    {isScanning ? "Processing..." : "Upload Screenshot"}
+                    <input type="file" accept="image/*,.heic,.heif" className="hidden" onChange={(e) => {const f = e.target.files?.[0]; if(f) processFile(f);}} disabled={isScanning} />
                   </label>
                   {error && <div className="mt-4 p-3 bg-red-500/20 rounded-lg text-xs font-bold text-red-50">{error}</div>}
                 </div>
 
                 {lastImage && (
                   <div className="bg-white p-4 rounded-3xl border border-slate-200 shadow-sm overflow-hidden group">
-                    <h3 className="font-bold text-slate-800 mb-3 text-xs uppercase tracking-wider px-2">Current Worklist Image</h3>
+                    <h3 className="font-bold text-slate-800 mb-3 text-xs uppercase tracking-wider px-2">Worklist Image</h3>
                     <div 
                       className="relative rounded-2xl overflow-hidden cursor-zoom-in aspect-video bg-slate-100 border border-slate-100"
                       onClick={() => setIsModalOpen(true)}
                     >
                       <img src={lastImage} alt="Worklist thumbnail" className="w-full h-full object-cover transition-transform group-hover:scale-105 duration-500" />
-                      <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100">
-                        <span className="bg-white text-indigo-600 px-4 py-2 rounded-full font-bold text-sm shadow-xl flex items-center gap-2">
-                           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v3m0 0v3m0-3h3m-3 0H9" /></svg>
-                           Inspect
-                        </span>
-                      </div>
                     </div>
                   </div>
                 )}
                 
                 {studies.length > 0 && (
-                  <button onClick={clearAll} className="w-full py-2 text-slate-400 hover:text-red-500 text-xs font-bold uppercase tracking-widest transition-colors">Reset Worklist</button>
+                  <button onClick={clearAll} className="w-full py-2 text-slate-400 hover:text-red-500 text-xs font-bold uppercase tracking-widest transition-colors">Reset Entire Worklist</button>
                 )}
               </div>
 
-              <div className="lg:col-span-2">
-                <StudyTable studies={studies} onDelete={deleteStudy} />
+              <div className="lg:col-span-2 space-y-6">
+                <div className="flex justify-end">
+                   {studies.length > 0 && (
+                     <button 
+                        onClick={generatePDF}
+                        disabled={isExporting}
+                        className="flex items-center gap-3 px-8 py-4 bg-emerald-600 text-white rounded-2xl font-bold text-sm shadow-lg hover:bg-emerald-700 hover:-translate-y-1 transition-all active:translate-y-0 disabled:opacity-50 disabled:translate-y-0"
+                     >
+                       {isExporting ? (
+                         <span className="flex items-center gap-2">
+                           <svg className="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                           Generating PDF...
+                         </span>
+                       ) : (
+                         <>
+                           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                           Save & Download {isGrouped ? 'Consolidated' : 'Individual'} PDF
+                         </>
+                       )}
+                     </button>
+                   )}
+                </div>
+
+                <StudyTable 
+                  studies={studies} 
+                  displayStudies={displayStudies} 
+                  isGrouped={isGrouped} 
+                  setIsGrouped={setIsGrouped} 
+                  onDelete={deleteStudy} 
+                />
+                
                 {studies.length === 0 && !isScanning && (
                   <div className="h-64 flex flex-col items-center justify-center border-2 border-dashed border-slate-200 rounded-3xl text-slate-300 bg-white">
                     <p className="font-bold">Worklist is empty</p>
-                    <p className="text-sm">Scan a list to calculate today's totals.</p>
+                    <p className="text-sm">Scan a list to start your report.</p>
                   </div>
                 )}
                 {isScanning && studies.length === 0 && (
@@ -322,13 +546,8 @@ const App: React.FC = () => {
             <div className="p-8 border-b border-slate-100 bg-slate-50/50 flex flex-col md:flex-row justify-between items-center gap-4">
               <div>
                 <h2 className="text-2xl font-bold text-slate-900">Reference RVU Database</h2>
-                <p className="text-slate-500 text-sm">Matches are verified against this list after intelligent abbreviation expansion.</p>
+                <p className="text-slate-500 text-sm">Matches are verified against this list.</p>
               </div>
-              <label className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-bold text-sm cursor-pointer hover:bg-indigo-700 transition-all flex items-center gap-2">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
-                Import CSV Database
-                <input type="file" accept=".csv" className="hidden" onChange={handleCSVUpload} />
-              </label>
             </div>
             <div className="overflow-x-auto max-h-[600px]">
               <table className="w-full text-left">
@@ -358,26 +577,10 @@ const App: React.FC = () => {
         <div className="fixed inset-0 z-50 flex flex-col bg-black/90 backdrop-blur-md">
           <div className="flex items-center justify-between p-4 bg-white/10 backdrop-blur-md border-b border-white/10">
             <h3 className="text-white font-bold px-4">Image Inspector</h3>
-            <div className="flex items-center gap-6">
-              <div className="flex items-center gap-4 text-white">
-                <span className="text-xs font-bold uppercase tracking-widest text-white/50">Zoom</span>
-                <input 
-                  type="range" min="1" max="4" step="0.1" 
-                  value={zoom} 
-                  onChange={(e) => setZoom(parseFloat(e.target.value))}
-                  className="w-32 accent-indigo-500"
-                />
-                <span className="font-mono text-sm w-12">{zoom.toFixed(1)}x</span>
-              </div>
-              <button 
-                onClick={() => setIsModalOpen(false)}
-                className="p-2 text-white/70 hover:text-white transition-colors"
-              >
+            <button onClick={() => setIsModalOpen(false)} className="p-2 text-white/70 hover:text-white transition-colors">
                 <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" /></svg>
-              </button>
-            </div>
+            </button>
           </div>
-
           <div 
             className="flex-1 overflow-hidden relative cursor-move flex items-center justify-center"
             onMouseDown={handleMouseDown}
@@ -392,17 +595,8 @@ const App: React.FC = () => {
                 transformOrigin: 'center center'
               }}
             >
-              <img 
-                ref={imageRef}
-                src={lastImage} 
-                alt="Full Worklist" 
-                className="max-w-[90vw] max-h-[80vh] object-contain shadow-2xl pointer-events-none"
-              />
+              <img ref={imageRef} src={lastImage} alt="Full Worklist" className="max-w-[90vw] max-h-[80vh] object-contain shadow-2xl pointer-events-none" />
             </div>
-          </div>
-
-          <div className="p-3 bg-white/5 text-center text-white/40 text-[10px] uppercase tracking-[0.2em] font-bold">
-            Drag to pan when zoomed • Use slider to adjust focus
           </div>
         </div>
       )}

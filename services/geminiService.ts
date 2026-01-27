@@ -1,49 +1,35 @@
+
 import { GoogleGenAI, Type } from "@google/genai";
 import { StudyDefinition } from "../types";
 
 export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDefinition[]) => {
-  // --- UNIVERSAL KEY FIX START ---
-  let apiKey = '';
-  try {
-    // Check for Vite/Netlify prefixed variable
-    if (typeof import.meta !== 'undefined' && import.meta.env) {
-      apiKey = import.meta.env.VITE_GEMINI_API_KEY || '';
-    }
-  } catch (e) {
-    // Ignore errors if environment doesn't support import.meta
-  }
-
-  // Fallback to Studio's internal variable
-  if (!apiKey) {
-    apiKey = process.env.API_KEY || '';
-  }
-
-  if (!apiKey) {
-    console.error("No API key found. Ensure VITE_GEMINI_API_KEY is set in Netlify.");
-    return [];
-  }
-  // --- UNIVERSAL KEY FIX END ---
-
-  const ai = new GoogleGenAI({ apiKey: apiKey });
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   const studyListForContext = currentDb.map(s => `NAME: ${s.name} | CPT: ${s.cpt}`).join('\n');
 
   const systemInstruction = `
-    You are an expert Radiology Medical Coder. Match extracted studies to the REFERENCE LIST.
+    You are an expert Radiology Medical Coder. 
+    1. Extract every individual radiology procedure listed in the image. 
+    2. DO NOT aggregate or combine procedures of the same type; if you see "CT Head" listed 3 times, return 3 separate entries.
+    3. Match each extracted entry to the closest procedure in the REFERENCE LIST.
+    
     REFERENCE LIST:
     ${studyListForContext}
+    
     OUTPUT: JSON only with a "studies" array.
   `;
 
   try {
-    // Clean the image data
+    // Extract MIME type and raw data from the data URL
+    const mimeMatch = base64Image.match(/^data:(image\/\w+);base64,/);
+    const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
     const rawImageData = base64Image.includes(',') ? base64Image.split(',')[1] : base64Image;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash', // Use stable version for production
+      model: 'gemini-3-flash-preview',
       contents: {
         parts: [
-          { inlineData: { mimeType: 'image/jpeg', data: rawImageData } },
-          { text: "Extract radiology procedures and return as JSON." }
+          { inlineData: { mimeType, data: rawImageData } },
+          { text: "Extract all radiology procedures individually. Do not combine them. Return as JSON." }
         ]
       },
       config: {
@@ -59,7 +45,7 @@ export const performOCRAndMatch = async (base64Image: string, currentDb: StudyDe
                 properties: {
                   cpt: { type: Type.STRING },
                   name: { type: Type.STRING },
-                  quantity: { type: Type.NUMBER },
+                  quantity: { type: Type.NUMBER, description: "Set to 1 for each individual entry found." },
                   originalText: { type: Type.STRING },
                   confidence: { type: Type.NUMBER }
                 },
